@@ -18,9 +18,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const thread = useStream<{
     messages: Message[];
-    initial_search_query_count: number;
-    max_research_loops: number;
     reasoning_model: string;
+    rag_query: string | null;
+    rag_docs: string | null;
   }>({
     apiUrl: import.meta.env.DEV
       ? "http://localhost:2024"
@@ -100,7 +100,7 @@ export default function App() {
   }, [thread.messages, thread.isLoading, processedEventsTimeline]);
 
   const handleSubmit = useCallback(
-    (submittedInputValue: string, effort: string, model: string) => {
+    (submittedInputValue: string, model: string) => {
       if (!submittedInputValue.trim()) return;
       setProcessedEventsTimeline([]);
       hasFinalizeEventOccurredRef.current = false;
@@ -109,22 +109,6 @@ export default function App() {
       // low means max 1 loop and 1 query
       // medium means max 3 loops and 3 queries
       // high means max 10 loops and 5 queries
-      let initial_search_query_count = 0;
-      let max_research_loops = 0;
-      switch (effort) {
-        case "low":
-          initial_search_query_count = 1;
-          max_research_loops = 1;
-          break;
-        case "medium":
-          initial_search_query_count = 3;
-          max_research_loops = 3;
-          break;
-        case "high":
-          initial_search_query_count = 5;
-          max_research_loops = 10;
-          break;
-      }
 
       const newMessages: Message[] = [
         ...(thread.messages || []),
@@ -136,9 +120,9 @@ export default function App() {
       ];
       thread.submit({
         messages: newMessages,
-        initial_search_query_count: initial_search_query_count,
-        max_research_loops: max_research_loops,
         reasoning_model: model,
+        rag_query: null,
+        rag_docs: null,
       });
     },
     [thread]
