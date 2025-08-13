@@ -3,16 +3,13 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph, START, END
 from langchain_core.runnables import RunnableConfig
-from google.genai import Client
 import chromadb
-from agent.configuration import Configuration
 from langchain_google_genai import ChatGoogleGenerativeAI
 from sentence_transformers import SentenceTransformer
-from langchain_core.messages import SystemMessage
-from typing import TypedDict, List, Any
-
+from typing import List, Any
 from langgraph.graph import add_messages
-from typing_extensions import Annotated
+from typing_extensions import Annotated, TypedDict
+
 
 class OverallState(TypedDict):
     messages: Annotated[list, add_messages] | None  # Conversation history
@@ -75,7 +72,7 @@ def answer_with_rag(state: OverallState, config: RunnableConfig) -> dict:
         model="gemini-2.5-flash",
         temperature=0,
         max_retries=2,
-        api_key="AIzaSyCG9fTMIN6pS-mrb7i9ONEBcNLTEjFT6ok",
+        api_key=os.getenv("GEMINI_API_KEY"),
     )
 
     result = llm.invoke(formatted_prompt)

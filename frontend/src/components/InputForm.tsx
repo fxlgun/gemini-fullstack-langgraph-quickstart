@@ -51,7 +51,7 @@ export const InputForm: React.FC<InputFormProps> = ({
       className={`flex flex-col gap-2 p-3 pb-4`}
     >
       <div
-        className={`flex flex-row items-center justify-between text-white rounded-3xl rounded-bl-sm ${
+        className={`flex flex-row items-center justify-between text-white rounded-3xl  ${
           hasHistory ? "rounded-br-sm" : ""
         } break-words min-h-7 bg-neutral-700 px-4 pt-3 `}
       >
@@ -59,7 +59,7 @@ export const InputForm: React.FC<InputFormProps> = ({
           value={internalInputValue}
           onChange={(e) => setInternalInputValue(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Who won the Euro 2024 and scored the most goals?"
+          placeholder="Which land parcel has the most area in Bavlu?"
           className={`w-full text-neutral-100 placeholder-neutral-500 resize-none border-0 focus:outline-none focus:ring-0 outline-none focus-visible:ring-0 shadow-none
                         md:text-base  min-h-[56px] max-h-[200px]`}
           rows={1}
@@ -93,7 +93,7 @@ export const InputForm: React.FC<InputFormProps> = ({
         </div>
       </div>
       <div className="flex items-center justify-between">
-        <div className="flex flex-row gap-2">
+        {/* <div className="flex flex-row gap-2">
           <div className="flex flex-row gap-2 bg-neutral-700 border-neutral-600 text-neutral-300 focus:ring-neutral-500 rounded-xl rounded-t-sm pl-2  max-w-[100%] sm:max-w-[90%]">
             <div className="flex flex-row items-center text-sm">
               <Brain className="h-4 w-4 mr-2" />
@@ -162,7 +162,7 @@ export const InputForm: React.FC<InputFormProps> = ({
               </SelectContent>
             </Select>
           </div>
-        </div>
+        </div> */}
         {hasHistory && (
           <Button
             className="bg-neutral-700 border-neutral-600 text-neutral-300 cursor-pointer rounded-xl rounded-t-sm pl-2 "

@@ -1,12 +1,16 @@
+// src/App.tsx  (updated)
+// --- keep your existing imports, plus these ---
 import { useStream } from "@langchain/langgraph-sdk/react";
 import type { Message } from "@langchain/langgraph-sdk";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { ProcessedEvent } from "@/components/ActivityTimeline";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
+import { auth, signOut } from "./firebase";
 import { Button } from "@/components/ui/button";
 
 export default function App() {
+  // --- existing state and refs ---
   const [processedEventsTimeline, setProcessedEventsTimeline] = useState<
     ProcessedEvent[]
   >([]);
@@ -16,6 +20,14 @@ export default function App() {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const hasFinalizeEventOccurredRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
+
+  // NEW: track the phone-based user identity and the thread_id we will use
+  const [userPhone, setUserPhone] = useState<string | null>(null); // e.g. "+919876543210"
+  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
+  const [initializingThread, setInitializingThread] = useState(false);
+  const [idToken, setIdToken] = useState<string | null>(null);
+
+  // useStream as before
   const thread = useStream<{
     messages: Message[];
     reasoning_model: string;
@@ -27,12 +39,17 @@ export default function App() {
       : "http://localhost:8123",
     assistantId: "agent",
     messagesKey: "messages",
+    defaultHeaders: {
+      Authorization: `Bearer ${idToken}`,
+    },
     onUpdateEvent: (event: any) => {
+      // unchanged event mapping
       let processedEvent: ProcessedEvent | null = null;
-      if (event.generate_query) {
+      console.log("Received event:", event);
+      if (event.retrieve_rag_docs) {
         processedEvent = {
-          title: "Generating Search Queries",
-          data: event.generate_query?.search_query?.join(", ") || "",
+          title: "Retrieving data from Documents",
+          data: `For information on ${event.retrieve_rag_docs.rag_query}`,
         };
       } else if (event.web_research) {
         const sources = event.web_research.sources_gathered || [];
@@ -58,6 +75,11 @@ export default function App() {
           data: "Composing and presenting the final answer.",
         };
         hasFinalizeEventOccurredRef.current = true;
+      } else if (event.answer_with_rag) {
+        processedEvent = {
+          title: "Finalizing Answer",
+          data: `Composing and bringing you the final answer.`,
+        };
       }
       if (processedEvent) {
         setProcessedEventsTimeline((prevEvents) => [
@@ -71,6 +93,22 @@ export default function App() {
     },
   });
 
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged(async (user) => {
+      if (user) {
+        const token = await user.getIdToken();
+        setIdToken(token);
+        setUserPhone(user.phoneNumber || null); // store phone number
+      } else {
+        setIdToken(null);
+        setUserPhone(null);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // --- scroll behaviour + finalize saving (unchanged) ---
   useEffect(() => {
     if (scrollAreaRef.current) {
       const scrollViewport = scrollAreaRef.current.querySelector(
@@ -99,17 +137,28 @@ export default function App() {
     }
   }, [thread.messages, thread.isLoading, processedEventsTimeline]);
 
+  // ---------------------------
+  // Logout handler (unchanged)
+  // ---------------------------
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      window.location.reload();
+    } catch (err) {
+      console.error("Logout error:", err);
+    }
+  };
+
+  // ---------------------------
+  // handleSubmit: uses the currentThreadId (if available)
+  // ---------------------------
   const handleSubmit = useCallback(
     (submittedInputValue: string, model: string) => {
       if (!submittedInputValue.trim()) return;
       setProcessedEventsTimeline([]);
       hasFinalizeEventOccurredRef.current = false;
 
-      // convert effort to, initial_search_query_count and max_research_loops
-      // low means max 1 loop and 1 query
-      // medium means max 3 loops and 3 queries
-      // high means max 10 loops and 5 queries
-
+      // Build messages
       const newMessages: Message[] = [
         ...(thread.messages || []),
         {
@@ -118,14 +167,30 @@ export default function App() {
           id: Date.now().toString(),
         },
       ];
-      thread.submit({
-        messages: newMessages,
-        reasoning_model: model,
-        rag_query: null,
-        rag_docs: null,
-      });
+
+      // If we have a thread_id, pass it through config so the run attaches to persisted thread
+      if (currentThreadId) {
+        thread.submit({
+          messages: newMessages,
+          reasoning_model: model,
+          rag_query: null,
+          rag_docs: null,
+          // NOTE: some SDKs accept a separate options arg; here we embed a common pattern
+          config: {
+            configurable: { thread_id: currentThreadId } as any,
+          } as any,
+        } as any);
+      } else {
+        // No pre-created thread — fallback to prior behaviour (SDK auto-creates thread)
+        thread.submit({
+          messages: newMessages,
+          reasoning_model: model,
+          rag_query: null,
+          rag_docs: null,
+        });
+      }
     },
-    [thread]
+    [thread, currentThreadId]
   );
 
   const handleCancel = useCallback(() => {
@@ -135,38 +200,50 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
-      <main className="h-full w-full max-w-4xl mx-auto">
-          {thread.messages.length === 0 ? (
-            <WelcomeScreen
-              handleSubmit={handleSubmit}
-              isLoading={thread.isLoading}
-              onCancel={handleCancel}
-            />
-          ) : error ? (
-            <div className="flex flex-col items-center justify-center h-full">
-              <div className="flex flex-col items-center justify-center gap-4">
-                <h1 className="text-2xl text-red-400 font-bold">Error</h1>
-                <p className="text-red-400">{JSON.stringify(error)}</p>
+      {/* place logout in top-right */}
+      <header className="absolute top-4 right-4 z-50">
+        <Button
+          variant="secondary"
+          size="sm"
+          className="shadow-md"
+          onClick={handleLogout}
+        >
+          Logout
+        </Button>
+      </header>
 
-                <Button
-                  variant="destructive"
-                  onClick={() => window.location.reload()}
-                >
-                  Retry
-                </Button>
-              </div>
+      <main className="h-full w-full max-w-4xl mx-auto">
+        {thread.messages.length === 0 ? (
+          <WelcomeScreen
+            handleSubmit={handleSubmit}
+            isLoading={thread.isLoading || initializingThread}
+            onCancel={handleCancel}
+          />
+        ) : error ? (
+          <div className="flex flex-col items-center justify-center h-full">
+            <div className="flex flex-col items-center justify-center gap-4">
+              <h1 className="text-2xl text-red-400 font-bold">Error</h1>
+              <p className="text-red-400">{JSON.stringify(error)}</p>
+
+              <Button
+                variant="destructive"
+                onClick={() => window.location.reload()}
+              >
+                Retry
+              </Button>
             </div>
-          ) : (
-            <ChatMessagesView
-              messages={thread.messages}
-              isLoading={thread.isLoading}
-              scrollAreaRef={scrollAreaRef}
-              onSubmit={handleSubmit}
-              onCancel={handleCancel}
-              liveActivityEvents={processedEventsTimeline}
-              historicalActivities={historicalActivities}
-            />
-          )}
+          </div>
+        ) : (
+          <ChatMessagesView
+            messages={thread.messages}
+            isLoading={thread.isLoading}
+            scrollAreaRef={scrollAreaRef}
+            onSubmit={handleSubmit}
+            onCancel={handleCancel}
+            liveActivityEvents={processedEventsTimeline}
+            historicalActivities={historicalActivities}
+          />
+        )}
       </main>
     </div>
   );

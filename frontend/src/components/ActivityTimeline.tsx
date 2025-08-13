@@ -48,7 +48,12 @@ export function ActivityTimeline({
       return <Search className="h-4 w-4 text-neutral-400" />;
     } else if (title.toLowerCase().includes("finalizing")) {
       return <Pen className="h-4 w-4 text-neutral-400" />;
+    } else if (title.toLowerCase().includes("retrieve_rag_docs")) {
+      return <Search className="h-4 w-4 text-neutral-400" />;
+    } else if (title.toLowerCase().includes("answer_with_rag")) {
+      return <Pen className="h-4 w-4 text-neutral-400" />;
     }
+
     return <Activity className="h-4 w-4 text-neutral-400" />;
   };
 

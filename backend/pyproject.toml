@@ -3,7 +3,7 @@ name = "agent"
 version = "0.0.1"
 description = "Backend for the LangGraph agent"
 authors = [
-    { name = "Philipp Schmid", email = "schmidphilipp1995@gmail.com" },
+    { name = "Falgun Gohel", email = "falgunagohel@gmail.com" },
 ]
 readme = "README.md"
 license = { text = "MIT" }
@@ -18,6 +18,13 @@ dependencies = [
     "langgraph-api",
     "fastapi",
     "google-genai",
+    "firebase-admin",
+    "psycopg2-binary",
+    "beautifulsoup4",
+    "sentence-transformers",
+    "chromadb",
+    "requests",
+    "google-cloud-storage",
 ]
 
 

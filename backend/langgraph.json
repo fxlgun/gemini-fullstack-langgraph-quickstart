@@ -6,5 +6,9 @@
   "http": {
     "app": "./src/agent/app.py:app"
   },
+  "auth": {
+    "path": "./firebase_auth.py:lg_auth"
+  },
+
   "env": ".env"
 }
