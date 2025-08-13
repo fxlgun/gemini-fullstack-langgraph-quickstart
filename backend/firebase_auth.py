@@ -1,6 +1,8 @@
 import firebase_admin
 from firebase_admin import auth as fb_auth, credentials
 from fastapi import Request, HTTPException
+import os
+
 cred_info = {
     "type": os.getenv("GOOGLE_TYPE"),
     "project_id": os.getenv("GOOGLE_PROJECT_ID"),
