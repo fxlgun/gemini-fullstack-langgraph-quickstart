@@ -11,6 +11,7 @@ from langgraph.graph import add_messages
 from typing_extensions import Annotated, TypedDict
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langgraph_api.store import get_store
+import urllib.parse
 
 class OverallState(TypedDict):
     messages: Annotated[list, add_messages] | None  # Conversation history
@@ -37,6 +38,11 @@ Question:
 
 Answer clearly and concisely using only the given context when possible.
 If the context does not have the answer, say you don't know.
+Add citations to the sources you use.
+
+When citing a source:
+- Always use the `Link:` provided in the context.
+- Format it as [display_name](link), where display_name is the filename without extension.
 """
 
 
@@ -45,13 +51,15 @@ async def retrieve_rag_docs(state: OverallState, config: RunnableConfig) -> dict
     query = state["messages"][-1]["content"]
     store = await get_store()
     # Store expects a namespace per tenant and collection
-    items = await store.asearch((os.getenv("LANGGRAPH_TENANT_ID"), COLLECTION_NAME), query=query, limit=10)
-    print("Items found:", items[0].key)
+    items = await store.asearch((os.getenv("LANGGRAPH_TENANT_ID"), COLLECTION_NAME), query=query, limit=5)
+    print("Items found:", items[0])
 
     docs = [
     {
         "filename": item.key,
-        "html": item.value
+        "html": item.value,
+        "score": item.score,
+        "link": "https://storage.googleapis.com/integrated_report_html/" + urllib.parse.quote(item.key),
     }
     for item in items
 ]
@@ -66,7 +74,11 @@ async def retrieve_rag_docs(state: OverallState, config: RunnableConfig) -> dict
 def answer_with_rag(state: OverallState, config: RunnableConfig) -> dict:
     query = state["rag_query"]
     docs = state["rag_docs"]
-    context = "\n\n---\n\n".join([d["html"] for d in docs])
+    context = "\n\n---\n\n".join(
+    f"### {d['filename']}\nLink: {d['link']}\n\n{d['html']}"
+    for d in docs
+)
+
     formatted_prompt = gemini_rag_prompt.format(context=context, query=query)
 
 
