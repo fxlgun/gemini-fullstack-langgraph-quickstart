@@ -9,7 +9,8 @@ from sentence_transformers import SentenceTransformer
 from typing import List, Any
 from langgraph.graph import add_messages
 from typing_extensions import Annotated, TypedDict
-
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langgraph_api.store import get_store
 
 class OverallState(TypedDict):
     messages: Annotated[list, add_messages] | None  # Conversation history
@@ -40,31 +41,32 @@ If the context does not have the answer, say you don't know.
 
 
 # 1️⃣ Retrieve docs
-def retrieve_rag_docs(state: OverallState, config: RunnableConfig) -> dict:
+async def retrieve_rag_docs(state: OverallState, config: RunnableConfig) -> dict:
     query = state["messages"][-1]["content"]
+    store = await get_store()
+    # Store expects a namespace per tenant and collection
+    items = await store.asearch((os.getenv("LANGGRAPH_TENANT_ID"), COLLECTION_NAME), query=query, limit=10)
+    print("Items found:", items[0].key)
 
-    client = chromadb.PersistentClient(path=CHROMA_DB_FOLDER)
-    collection = client.get_collection(COLLECTION_NAME)
+    docs = [
+    {
+        "filename": item.key,
+        "html": item.value
+    }
+    for item in items
+]
 
-    embed_model = SentenceTransformer(EMBED_MODEL_NAME)
-    q_emb = embed_model.encode([query]).tolist()[0]
-
-    results = collection.query(query_embeddings=[q_emb], n_results=10)
-    docs = results["documents"][0]
 
     return { 
         "messages": state["messages"],
         "rag_query": query,
         "rag_docs": docs,
     }
-
-
 # 2️⃣ Generate answer with Gemini
 def answer_with_rag(state: OverallState, config: RunnableConfig) -> dict:
     query = state["rag_query"]
     docs = state["rag_docs"]
-    context = "\n\n---\n\n".join(docs)
-
+    context = "\n\n---\n\n".join([d["html"] for d in docs])
     formatted_prompt = gemini_rag_prompt.format(context=context, query=query)
 
 

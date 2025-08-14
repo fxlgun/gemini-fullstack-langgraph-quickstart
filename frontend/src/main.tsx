@@ -11,18 +11,26 @@ import LoginPage from "./LoginPage";
 function Root() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [idToken, setIdToken] = useState<string | null>(null);
+
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u: User | null) => {
       setUser(u);
       setLoading(false);
+      if (u) {
+        u.getIdToken().then((token) => {
+          setIdToken(token);
+        });
+      }
+
     });
     return () => unsubscribe();
   }, []);
 
   if (loading) return <div>Loading...</div>;
 
-  return user ? <App /> : <LoginPage/>;
+  return user ? <App token={idToken} /> : <LoginPage/>;
 }
 
 createRoot(document.getElementById("root")!).render(

@@ -1,4 +1,5 @@
 # mypy: disable - error - code = "no-untyped-def,misc"
+import asyncio
 import pathlib
 from fastapi import FastAPI, Response
 from fastapi.staticfiles import StaticFiles
@@ -10,11 +11,14 @@ import requests
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
 from typing import Dict, Any
-
+from google.cloud import storage
+from langgraph_api.store import get_store
+from google.oauth2 import service_account
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from bs4 import BeautifulSoup
 from sentence_transformers import SentenceTransformer
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import chromadb
 
 # Your existing config constants from environment or default values
@@ -25,17 +29,37 @@ DB_CONFIG = {
     "password": os.environ.get("DB_PASS"),
     "dbname": os.environ.get("DB_NAME"),
 }
+
+cred_info = {
+    "type": os.getenv("GOOGLE_TYPE"),
+    "project_id": os.getenv("GOOGLE_PROJECT_ID"),
+    "private_key_id": os.getenv("GOOGLE_PRIVATE_KEY_ID"),
+    "private_key": os.getenv("GOOGLE_PRIVATE_KEY").replace("\\n", "\n"),
+    "client_email": os.getenv("GOOGLE_CLIENT_EMAIL"),
+    "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+    "auth_uri": os.getenv("GOOGLE_AUTH_URI"),
+    "token_uri": os.getenv("GOOGLE_TOKEN_URI"),
+    "auth_provider_x509_cert_url": os.getenv("GOOGLE_AUTH_PROVIDER_X509_CERT_URL"),
+    "client_x509_cert_url": os.getenv("GOOGLE_CLIENT_X509_CERT_URL"),
+    "universe_domain": os.getenv("GOOGLE_UNIVERSE_DOMAIN"),
+}
+
 QUEUE_API = os.environ.get("QUEUE_API", "")
 CHROMA_DB_FOLDER = os.environ.get("CHROMA_DB_FOLDER", "chrome_db_folder")
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 COLLECTION_NAME = 'land_parcels'
+embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+bucket_name = 'integrated_report_html'
+credentials = service_account.Credentials.from_service_account_info(cred_info)
+storage_client = storage.Client(credentials=credentials, project=cred_info["project_id"])
+bucket = storage_client.bucket(bucket_name)
 
 
 # Define the FastAPI app
 app = FastAPI()
 
 
-def create_frontend_router(build_dir="../frontend/dist"):
+def create_frontend_router(build_dir="dist"):
     """Creates a router to serve the React frontend.
 
     Args:
@@ -44,23 +68,23 @@ def create_frontend_router(build_dir="../frontend/dist"):
     Returns:
         A Starlette application serving the frontend.
     """
-    build_path = pathlib.Path(__file__).parent.parent.parent / build_dir
+    build_path = build_dir
 
-    if not build_path.is_dir() or not (build_path / "index.html").is_file():
-        print(
-            f"WARN: Frontend build directory not found or incomplete at {build_path}. Serving frontend will likely fail."
-        )
-        # Return a dummy router if build isn't ready
-        from starlette.routing import Route
+    # if not build_path.is_dir() or not (build_path / "index.html").is_file():
+    #     print(
+    #         f"WARN: Frontend build directory not found or incomplete at {build_path}. Serving frontend will likely fail."
+    #     )
+    #     # Return a dummy router if build isn't ready
+    #     from starlette.routing import Route
 
-        async def dummy_frontend(request):
-            return Response(
-                "Frontend not built. Run 'npm run build' in the frontend directory.",
-                media_type="text/plain",
-                status_code=503,
-            )
+    #     async def dummy_frontend(request):
+    #         return Response(
+    #             "Frontend not built. Run 'npm run build' in the frontend directory.",
+    #             media_type="text/plain",
+    #             status_code=503,
+    #         )
 
-        return Route("/{path:path}", endpoint=dummy_frontend)
+    #     return Route("/{path:path}", endpoint=dummy_frontend)
 
     return StaticFiles(directory=build_path, html=True)
 
@@ -112,10 +136,11 @@ async def embed(body: Dict[str, Any] = Body(...)):
     if not required.issubset(body):
         raise HTTPException(status_code=400, detail="Missing required fields")
 
+    store = await get_store()
     # Start embedding in background thread to not block response
     threading.Thread(
         target=embed_htmls_for_village,
-        args=(body["state"], body["dname"], body["vname"], body["vvalue"]),
+        args=(body["state"], body["dname"], body["vname"], body["vvalue"], store),
         daemon=True,
     ).start()
 
@@ -141,44 +166,26 @@ def fetch_survey_rows(district, village, vvalue):
     finally:
         conn.close()
 
-def add_to_scrape_queue(survey_row: dict):
-    enqueue_url = f"{QUEUE_API}/enqueue"
-    try:
-        response = requests.post(enqueue_url, json=survey_row, timeout=5)
-        return response.status_code == 200
-    except Exception:
-        return False
-
-def embed_htmls_for_village(state, dname, vname, vvalue):
-    from google.cloud import storage
-    storage_client = storage.Client.from_service_account_json("townplanmap.json")
-    bucket = storage_client.bucket("integrated_report_html")
+def embed_htmls_for_village(state, dname, vname, vvalue, store):
+    print("Embedding started for:", vname)
     prefix = f"{state}/{vname.split('-')[0]}/"
     blobs = bucket.list_blobs(prefix=prefix)
-    file_list = [blob.name for blob in blobs if blob.name.endswith('.html')]
+    print("Fetched List of Blobs.", blobs)
+    tenant_id = os.getenv("LANGGRAPH_TENANT_ID")  # store this in env
+    print("Tenant ID:", tenant_id)
+    for blob in blobs:
+        blob_name = blob.name
+        print("Downloading blob for Survey No.:", blob_name)
+        html_data = blob.download_as_text()
+        print("Downloaded blob:", blob_name)
+        # Parse HTML to plain text
+        soup = BeautifulSoup(html_data, "html.parser")
+        text = soup.get_text(separator=" ", strip=True)
 
-    client = chromadb.PersistentClient(path=CHROMA_DB_FOLDER)
-    try:
-        collection = client.get_collection(COLLECTION_NAME)
-    except Exception:
-        collection = client.create_collection(COLLECTION_NAME)
-
-    docs, ids, meta = [], [], []
-    model = SentenceTransformer(EMBED_MODEL_NAME)
-    for i, blob_name in enumerate(file_list):
-        blob = bucket.blob(blob_name)
-        html = blob.download_as_text()
-        print(f"Downloaded {blob_name}")
-        soup = BeautifulSoup(html, 'html.parser')
-        text = soup.get_text(separator=' ', strip=True)
-
-        docs.append(text)
-        ids.append(f"{blob_name}_{i}_{int(time.time())}")
-        meta.append({'filename': blob_name, 'village': vname, 'district': dname})
-        print(f"Processed {blob_name}")
-        
-    print(f"Total documents processed: {len(docs)}. Starting to Encode Embeddings")
-    embeddings = model.encode(docs, show_progress_bar=True).tolist()
-    collection.add(documents=docs, embeddings=embeddings, metadatas=meta, ids=ids)
-    print(f"Embeddings added to collection. Total documents in collection: {collection.count()}")
+        store.put(
+            namespace=(tenant_id, COLLECTION_NAME),
+            key=blob_name,
+            value=text
+        )
+        print("Embedded blob:", blob_name)
 

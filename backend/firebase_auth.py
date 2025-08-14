@@ -2,6 +2,7 @@ import firebase_admin
 from firebase_admin import auth as fb_auth, credentials
 from fastapi import Request, HTTPException
 import os
+from types import SimpleNamespace
 
 cred_info = {
     "type": os.getenv("GOOGLE_TYPE"),
@@ -26,6 +27,10 @@ lg_auth = Auth()
 
 @lg_auth.authenticate
 def authenticate(request):
+    excluded_paths = ["/app"]
+    # Skip auth if the request path matches an excluded path
+    if request.url.path in excluded_paths:
+        return SimpleNamespace(identity="anonymous", is_authenticated=False)
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(401, "Missing auth")

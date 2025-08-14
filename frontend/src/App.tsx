@@ -1,15 +1,16 @@
 // src/App.tsx  (updated)
 // --- keep your existing imports, plus these ---
 import { useStream } from "@langchain/langgraph-sdk/react";
-import type { Message } from "@langchain/langgraph-sdk";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { Client, type Message } from "@langchain/langgraph-sdk";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ProcessedEvent } from "@/components/ActivityTimeline";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
 import { auth, signOut } from "./firebase";
 import { Button } from "@/components/ui/button";
 
-export default function App() {
+export default function App({ token }: { token: string | null }) {
+
   // --- existing state and refs ---
   const [processedEventsTimeline, setProcessedEventsTimeline] = useState<
     ProcessedEvent[]
@@ -25,7 +26,15 @@ export default function App() {
   const [userPhone, setUserPhone] = useState<string | null>(null); // e.g. "+919876543210"
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
   const [initializingThread, setInitializingThread] = useState(false);
-  const [idToken, setIdToken] = useState<string | null>(null);
+
+
+  const client = useMemo(() => {
+    return new Client({
+      apiUrl: "http://localhost:2024",
+        // "https://tpm-llm-cd738700aa8d554cbd0da144e4f1a3a8.us.langgraph.app",
+      defaultHeaders: { Authorization: `Bearer ${token}` },
+    });
+  }, [token]);
 
   // useStream as before
   const thread = useStream<{
@@ -34,14 +43,10 @@ export default function App() {
     rag_query: string | null;
     rag_docs: string | null;
   }>({
-    apiUrl: import.meta.env.DEV
-      ? "http://localhost:2024"
-      : "http://localhost:8123",
+    client: client,
+    defaultHeaders: { Authorization: `Bearer ${token}` },
     assistantId: "agent",
     messagesKey: "messages",
-    defaultHeaders: {
-      Authorization: `Bearer ${idToken}`,
-    },
     onUpdateEvent: (event: any) => {
       // unchanged event mapping
       let processedEvent: ProcessedEvent | null = null;
@@ -92,21 +97,6 @@ export default function App() {
       setError(error.message);
     },
   });
-
-  useEffect(() => {
-    const unsubscribe = auth.onAuthStateChanged(async (user) => {
-      if (user) {
-        const token = await user.getIdToken();
-        setIdToken(token);
-        setUserPhone(user.phoneNumber || null); // store phone number
-      } else {
-        setIdToken(null);
-        setUserPhone(null);
-      }
-    });
-
-    return () => unsubscribe();
-  }, []);
 
   // --- scroll behaviour + finalize saving (unchanged) ---
   useEffect(() => {
@@ -197,7 +187,7 @@ export default function App() {
     thread.stop();
     window.location.reload();
   }, [thread]);
-
+  if (!client) return <div>Loading...</div>;
   return (
     <div className="flex h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
       {/* place logout in top-right */}
