@@ -1,4 +1,4 @@
-import path from "node:path";
+import path, { resolve } from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
 import tailwindcss from "@tailwindcss/vite";
@@ -7,6 +7,10 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   base: "/app/",
+  build:{
+    outDir: resolve(__dirname, '../backend/dist'), // 👈 output to backend/dist
+    emptyOutDir: true, // cleans before build
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

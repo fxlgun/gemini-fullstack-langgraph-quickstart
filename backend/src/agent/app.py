@@ -91,7 +91,7 @@ def create_frontend_router(build_dir="dist"):
 
 # Mount the frontend under /app to not conflict with the LangGraph API routes
 app.mount(
-    "/app",
+    "/",
     create_frontend_router(),
     name="frontend",
 )

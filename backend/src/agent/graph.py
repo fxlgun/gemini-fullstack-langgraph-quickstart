@@ -38,7 +38,7 @@ Question:
 
 Answer clearly and concisely using only the given context when possible.
 If the context does not have the answer, say you don't know.
-Add citations to the sources you use.
+Add citations to the sources you use
 
 When citing a source:
 - Always use the `Link:` provided in the context.
