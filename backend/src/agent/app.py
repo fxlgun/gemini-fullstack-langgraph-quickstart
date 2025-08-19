@@ -1,11 +1,7 @@
 # mypy: disable - error - code = "no-untyped-def,misc"
-import asyncio
-import pathlib
 from fastapi import FastAPI, Response
 from fastapi.staticfiles import StaticFiles
 import threading
-import time
-import traceback
 import os
 import requests
 from fastapi import Request, HTTPException
@@ -19,7 +15,23 @@ from psycopg2.extras import RealDictCursor
 from bs4 import BeautifulSoup
 from sentence_transformers import SentenceTransformer
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-import chromadb
+import firebase_admin
+from firebase_admin import auth as fb_auth, credentials, storage as fb_storage
+import httpx
+
+cred_info = {
+    "type": os.getenv("GOOGLE_TYPE"),
+    "project_id": os.getenv("GOOGLE_PROJECT_ID"),
+    "private_key_id": os.getenv("GOOGLE_PRIVATE_KEY_ID"),
+    "private_key": os.getenv("GOOGLE_PRIVATE_KEY").replace("\\n", "\n"),
+    "client_email": os.getenv("GOOGLE_CLIENT_EMAIL"),
+    "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+    "auth_uri": os.getenv("GOOGLE_AUTH_URI"),
+    "token_uri": os.getenv("GOOGLE_TOKEN_URI"),
+    "auth_provider_x509_cert_url": os.getenv("GOOGLE_AUTH_PROVIDER_X509_CERT_URL"),
+    "client_x509_cert_url": os.getenv("GOOGLE_CLIENT_X509_CERT_URL"),
+    "universe_domain": os.getenv("GOOGLE_UNIVERSE_DOMAIN"),
+}
 
 # Your existing config constants from environment or default values
 DB_CONFIG = {
@@ -44,7 +56,9 @@ cred_info = {
     "universe_domain": os.getenv("GOOGLE_UNIVERSE_DOMAIN"),
 }
 
-QUEUE_API = os.environ.get("QUEUE_API", "")
+cred = credentials.Certificate(cred_info)
+if not firebase_admin._apps:  # only init once
+    firebase_admin.initialize_app(cred)
 CHROMA_DB_FOLDER = os.environ.get("CHROMA_DB_FOLDER", "chrome_db_folder")
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 COLLECTION_NAME = 'land_parcels'
@@ -52,8 +66,7 @@ embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
 bucket_name = 'integrated_report_html'
 credentials = service_account.Credentials.from_service_account_info(cred_info)
 storage_client = storage.Client(credentials=credentials, project=cred_info["project_id"])
-bucket = storage_client.bucket(bucket_name)
-
+bucket = fb_storage.bucket('townplanmap.appspot.com')
 
 # Define the FastAPI app
 app = FastAPI()
@@ -91,7 +104,7 @@ def create_frontend_router(build_dir="dist"):
 
 # Mount the frontend under /app to not conflict with the LangGraph API routes
 app.mount(
-    "/",
+    "/app",
     create_frontend_router(),
     name="frontend",
 )
@@ -122,11 +135,12 @@ async def scrape(body: Dict[str, Any] = Body(...)):
     }
 
     try:
-        response = requests.post(CLOUD_FUNCTION_URL, json=payload, timeout=65)
-        if response.status_code == 200:
-            return {"success": True, "queued_jobs": len(rows), "requested": len(rows), "details": response.text}
-        else:
-            raise HTTPException(status_code=500, detail=f"Cloud function error: {response.text}")
+        async with httpx.AsyncClient(timeout=65) as client:
+            response = await client.post(CLOUD_FUNCTION_URL, json=payload)
+            if response.status_code == 200:
+                return {"success": True, "queued_jobs": len(rows), "requested": len(rows), "details": response.text}
+            else:
+                raise HTTPException(status_code=500, detail=f"Cloud function error: {response.text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Exception contacting cloud function: {str(e)}")
 
@@ -168,7 +182,7 @@ def fetch_survey_rows(district, village, vvalue):
 
 def embed_htmls_for_village(state, dname, vname, vvalue, store):
     print("Embedding started for:", vname)
-    prefix = f"{state}/{vname.split('-')[0]}/"
+    prefix = f"{bucket_name}/{state}/{vname.split('-')[0]}/"
     blobs = bucket.list_blobs(prefix=prefix)
     print("Fetched List of Blobs.", blobs)
     tenant_id = os.getenv("LANGGRAPH_TENANT_ID")  # store this in env
@@ -181,7 +195,6 @@ def embed_htmls_for_village(state, dname, vname, vvalue, store):
         # Parse HTML to plain text
         soup = BeautifulSoup(html_data, "html.parser")
         text = soup.get_text(separator=" ", strip=True)
-
         store.put(
             namespace=(tenant_id, COLLECTION_NAME),
             key=blob_name,
