@@ -51,7 +51,7 @@ async def retrieve_rag_docs(state: OverallState, config: RunnableConfig) -> dict
     query = state["messages"][-1]["content"]
     store = await get_store()
     # Store expects a namespace per tenant and collection
-    items = await store.asearch((os.getenv("LANGGRAPH_TENANT_ID"), COLLECTION_NAME), query=query)
+    items = await store.asearch((os.getenv("LANGGRAPH_TENANT_ID"), COLLECTION_NAME), query=query, limit=20)
     print("Items found:", items[0])
 
     docs = [
