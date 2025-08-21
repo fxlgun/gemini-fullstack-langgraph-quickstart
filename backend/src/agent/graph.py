@@ -52,14 +52,13 @@ async def retrieve_rag_docs(state: OverallState, config: RunnableConfig) -> dict
     store = await get_store()
     # Store expects a namespace per tenant and collection
     items = await store.asearch((os.getenv("LANGGRAPH_TENANT_ID"), COLLECTION_NAME), query=query, limit=20)
-    print("Items found:", items[0])
 
     docs = [
     {
         "filename": item.key,
         "html": item.value,
         "score": item.score,
-        "link": "https://storage.googleapis.com/integrated_report_html/" + urllib.parse.quote(item.key),
+        "link": "https://storage.cloud.google.com/townplanmap.appspot.com/" + urllib.parse.quote(item.key),
     }
     for item in items
 ]
