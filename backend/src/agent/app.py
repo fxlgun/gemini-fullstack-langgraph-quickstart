@@ -18,6 +18,106 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import firebase_admin
 from firebase_admin import auth as fb_auth, credentials, storage as fb_storage
 import httpx
+from google import genai
+from fuzzywuzzy import process
+import json
+
+RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "upin": {"type": "STRING"},
+        "state": {"type": "STRING"},
+        "district": {"type": "STRING"},
+        "taluka": {"type": "STRING"},
+        "village": {"type": "STRING"},
+        "survey_no": {"type": "STRING"},
+        "old_survey_number": {"type": "STRING"},
+        "zone": {"type": "STRING"},
+        "old_survey_notes": {"type": "STRING"},
+        "authority": {"type": "STRING"},
+        "promulgation_detail": {
+            "type": "OBJECT",
+            "properties": {
+                "note_number": {"type": "STRING"},
+                "date": {"type": "STRING"},
+                "order_no": {"type": "STRING"},
+                "order_date": {"type": "STRING"},
+                "officer": {"type": "STRING"},
+                "resurvey_range": {"type": "STRING"},
+                "pages": {"type": "INTEGER"}
+            }
+        },
+        "area_sq_mt": {
+            "type": "STRING"
+        },
+        "land_use": {"type": "STRING"},
+        "tenure": {"type": "STRING"},
+        "assessment": {"type": "STRING"},
+        "tax": {"type": "STRING"},
+        "jantri_value": {"type": "STRING"},
+        "khata_number": {"type": "STRING"},
+        "farm_name": {"type": "STRING"},
+        "owners": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "name": {"type": "STRING"},
+                    "relation": {"type": "STRING"},
+                    "remarks": {"type": "STRING"}
+                }
+            }
+        },
+        "mutations": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "entry_no": {"type": "STRING"},
+                    "date": {"type": "STRING"},
+                    "type": {"type": "STRING"},
+                    "status": {"type": "STRING"},
+                    "document_no": {"type": "STRING"}
+                }
+            }
+        },
+        "revenue_cases": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "office": {"type": "STRING"},
+                    "survey_no": {"type": "STRING"},
+                    "case_no": {"type": "STRING"},
+                    "status": {"type": "STRING"},
+                    "type": {"type": "STRING"},
+                    "remarks": {"type": "STRING"},
+                    "filing_date": {"type": "STRING"}
+                }
+            }
+        },
+        "encumbrances": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "type": {"type": "STRING"},
+                    "details": {"type": "STRING"},
+                    "date": {"type": "STRING"}
+                }
+            }
+        },
+        "deed_number": {"type": "STRING"},
+        "deed_date": {"type": "STRING"},
+        "deed_type": {"type": "STRING"},
+        "is_disputed": {"type": "BOOLEAN"},
+        "encumbrance_certificate": {"type": "STRING"},
+        "last_updated": {"type": "STRING"},
+        "certified_by": {"type": "STRING"},
+        "disclaimer": {"type": "STRING"}
+    }
+}
+
 
 cred_info = {
     "type": os.getenv("GOOGLE_TYPE"),
@@ -42,20 +142,6 @@ DB_CONFIG = {
     "dbname": os.environ.get("DB_NAME"),
 }
 
-cred_info = {
-    "type": os.getenv("GOOGLE_TYPE"),
-    "project_id": os.getenv("GOOGLE_PROJECT_ID"),
-    "private_key_id": os.getenv("GOOGLE_PRIVATE_KEY_ID"),
-    "private_key": os.getenv("GOOGLE_PRIVATE_KEY").replace("\\n", "\n"),
-    "client_email": os.getenv("GOOGLE_CLIENT_EMAIL"),
-    "client_id": os.getenv("GOOGLE_CLIENT_ID"),
-    "auth_uri": os.getenv("GOOGLE_AUTH_URI"),
-    "token_uri": os.getenv("GOOGLE_TOKEN_URI"),
-    "auth_provider_x509_cert_url": os.getenv("GOOGLE_AUTH_PROVIDER_X509_CERT_URL"),
-    "client_x509_cert_url": os.getenv("GOOGLE_CLIENT_X509_CERT_URL"),
-    "universe_domain": os.getenv("GOOGLE_UNIVERSE_DOMAIN"),
-}
-
 cred = credentials.Certificate(cred_info)
 if not firebase_admin._apps:  # only init once
     firebase_admin.initialize_app(cred)
@@ -67,6 +153,268 @@ bucket_name = 'integrated_report_html'
 credentials = service_account.Credentials.from_service_account_info(cred_info)
 storage_client = storage.Client(credentials=credentials, project=cred_info["project_id"])
 bucket = fb_storage.bucket('townplanmap.appspot.com')
+
+
+
+
+def get_db_conn():
+    return psycopg2.connect(**DB_CONFIG)
+
+def fetch_survey_rows(district, village, vvalue):
+    conn = get_db_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            sql = """
+                SELECT id, dname, dvalue, tname, tvalue, vname, vvalue, sname, svalue, visibility, lat, lng, geom
+                FROM public.master_survey_rural
+                WHERE dname=%s AND vname=%s AND vvalue=%s
+            """
+            cur.execute(sql, (district, village, vvalue))
+            rows = cur.fetchall()
+            return rows
+    finally:
+        conn.close()
+
+def embed_htmls_for_village(state, dname, vname, vvalue, store):
+    print("Embedding started for:", vname)
+    prefix = f"{bucket_name}/{state}/{vname.split('-')[0]}/"
+    blobs = bucket.list_blobs(prefix=prefix)
+    print("Fetched List of Blobs.", blobs)
+    tenant_id = os.getenv("LANGGRAPH_TENANT_ID")  # store this in env
+    print("Tenant ID:", tenant_id)
+    for blob in blobs:
+        blob_name = blob.name
+        print("Downloading blob for Survey No.:", blob_name)
+        html_data = blob.download_as_text()
+        print("Downloaded blob:", blob_name)
+        # Parse HTML to plain text
+        soup = BeautifulSoup(html_data, "html.parser")
+        text = soup.get_text(separator=" ", strip=True)
+        store.put(
+            namespace=(tenant_id, COLLECTION_NAME),
+            key=blob_name,
+            value=text
+        )
+        print("Embedded blob:", blob_name)
+
+def fuzzy_survey_id(report):
+    survey_no = report["survey_no"]
+    village = report["village"]
+    district = report["district"]
+    conn = get_db_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            sql = """
+                SELECT id
+                FROM public.survey_layer
+                WHERE similarity(district, %s) > 0.3
+	            AND similarity(village, %s) > 0.3
+                AND similarity(survey_no, %s) > 0.3
+            """
+            cur.execute(sql, (district, village, survey_no))
+            rows = cur.fetchall()
+            if rows:
+                return rows[0]["id"]
+            else:
+                return None
+    except Exception as e:
+        print("Error:", e)
+        return None
+    finally:
+        conn.close()
+
+def fuzzy_area_id(report):
+    village = report["village"]
+    district = report["district"]
+    conn = get_db_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            sql = """
+                SELECT area_id
+                FROM public.area_data
+                WHERE similarity(district, %s) > 0.3
+	            AND similarity(name, %s) > 0.3
+            """
+            cur.execute(sql, (district, village))
+            rows = cur.fetchall()
+            if rows:
+                return rows[0]["area_id"]
+            else:
+                return None
+    finally:
+        conn.close()
+        
+def insert_survey_layer(conn, report, area_id):
+    sql = """
+        INSERT INTO public.survey_layer (
+            upin, state, district, taluka, village, survey_no,
+            old_survey_number, old_survey_notes, zone, authority,
+            promulgation_detail, area_sq_mt, land_use, tenure,
+            assessment, tax, jantri_value, khata_number, farm_name,
+            owners, mutations, revenue_cases, encumbrances,
+            deed_number, deed_date, deed_type, is_disputed,
+            encumbrance_certificate, last_updated, certified_by,
+            disclaimer, area_id, uid
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,
+                %s,%s,%s,%s,
+                %s,%s,%s,%s,%s,
+                %s,%s,%s,%s,
+                %s,%s,%s,%s,
+                %s,%s,%s,%s,
+                %s,%s)
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, (
+            report.get("upin"),
+            report.get("state"),
+            report.get("district"),
+            report.get("taluka"),
+            report.get("village"),
+            report.get("survey_no"),
+            report.get("old_survey_number"),
+            report.get("old_survey_notes"),
+            report.get("zone"),
+            report.get("authority"),
+            json.dumps(report.get("promulgation_detail")),
+            report.get("area_sq_mt"),
+            report.get("land_use"),
+            report.get("tenure"),
+            report.get("assessment"),
+            report.get("tax"),
+            report.get("jantri_value"),
+            report.get("khata_number"),
+            report.get("farm_name"),
+            json.dumps(report.get("owners")),
+            json.dumps(report.get("mutations")),
+            json.dumps(report.get("revenue_cases")),
+            json.dumps(report.get("encumbrances")),
+            report.get("deed_number"),
+            report.get("deed_date"),
+            report.get("deed_type"),
+            report.get("is_disputed"),
+            report.get("encumbrance_certificate"),
+            report.get("last_updated"),
+            report.get("certified_by"),
+            report.get("disclaimer"),
+            area_id,
+            report.get("village", "").upper() + '_' + str(report.get("survey_no"))
+        ))
+    conn.commit()
+    print(f"Inserted new survey for survey_no={report.get('survey_no')}")
+
+
+def update_survey_layer(conn, survey_id, report, area_id):
+    """Update existing survey row with new fields if available"""
+    sql = """
+        UPDATE public.survey_layer
+        SET upin = COALESCE(%s, upin),
+            old_survey_notes = COALESCE(%s, old_survey_notes),
+            promulgation_detail = COALESCE(%s, promulgation_detail),
+            assessment = COALESCE(%s, assessment),
+            tax = COALESCE(%s, tax),
+            jantri_value = COALESCE(%s, jantri_value),
+            khata_number = COALESCE(%s, khata_number),
+            farm_name = COALESCE(%s, farm_name),
+            owners = COALESCE(%s, owners),
+            mutations = COALESCE(%s, mutations),
+            revenue_cases = COALESCE(%s, revenue_cases),
+            encumbrances = COALESCE(%s, encumbrances),
+            deed_number = COALESCE(%s, deed_number),
+            deed_date = COALESCE(%s, deed_date),
+            deed_type = COALESCE(%s, deed_type),
+            is_disputed = COALESCE(%s, is_disputed),
+            encumbrance_certificate = COALESCE(%s, encumbrance_certificate),
+            last_updated = COALESCE(%s, last_updated),
+            certified_by = COALESCE(%s, certified_by),
+            disclaimer = COALESCE(%s, disclaimer),
+            area_id = COALESCE(%s, area_id)
+        WHERE id = %s
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, (
+            report.get("upin"),
+            report.get("old_survey_notes"),
+            json.dumps(report.get("promulgation_detail")),
+            report.get("assessment"),
+            report.get("tax"),
+            report.get("jantri_value"),
+            report.get("khata_number"),
+            report.get("farm_name"),
+            json.dumps(report.get("owners")),
+            json.dumps(report.get("mutations")),
+            json.dumps(report.get("revenue_cases")),
+            json.dumps(report.get("encumbrances")),
+            report.get("deed_number"),
+            report.get("deed_date"),
+            report.get("deed_type"),
+            report.get("is_disputed"),
+            report.get("encumbrance_certificate"),
+            report.get("last_updated"),
+            report.get("certified_by"),
+            report.get("disclaimer"),
+            area_id,
+            survey_id
+        ))
+    conn.commit()
+    print(f"Updated survey_layer.id={survey_id}")
+
+
+
+def add_to_Postgis(state, dname, vname, vvalue):
+    print("Adding to Postgis started for:", vname)
+    prefix = f"{bucket_name}/{state}/{vname.split('-')[0]}/"
+    blobs = bucket.list_blobs(prefix=prefix)
+    print("Fetched List of Blobs.")
+    tenant_id = os.getenv("LANGGRAPH_TENANT_ID")  # store this in env
+    print("Tenant ID:", tenant_id)
+    for blob in blobs:
+        blob_name = blob.name
+        print("Downloading blob for Survey No.:", blob_name)
+        html_data = blob.download_as_text()
+        # Parse HTML to plain text
+        soup = BeautifulSoup(html_data, "html.parser")
+        text = soup.get_text(separator=" ", strip=True)
+        prompt = (
+            "Extract all relevant fields from this Gujarat integrated land record HTML transliterating them in English"
+            "and fill them into the defined JSON schema (fields may be null if absent):\n\n"
+            f"{text}" 
+        )
+
+        client = genai.Client()
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[prompt],
+            config={
+                "response_mime_type": "application/json",
+                "response_schema": RESPONSE_SCHEMA
+            },
+        )
+        report = response.parsed  # well-formed dict
+        print("Structured JSON:", report)
+        area_id = fuzzy_area_id(report)
+        report['area_id'] = area_id
+        report['state'] = state
+        survey_id = fuzzy_survey_id(report)
+        conn = get_db_conn()
+        if survey_id:
+            update_survey_layer(conn, survey_id, report, area_id)
+        else:
+            insert_survey_layer(conn, report, area_id)
+        print(area_id)
+        return True
+
+        
+        
+        
+
+
+TASKS = {
+    "embed_htmls": embed_htmls_for_village,
+    "add_to_Postgis": add_to_Postgis,
+
+}
 
 # Define the FastAPI app
 app = FastAPI()
@@ -82,23 +430,6 @@ def create_frontend_router(build_dir="dist"):
         A Starlette application serving the frontend.
     """
     build_path = build_dir
-
-    # if not build_path.is_dir() or not (build_path / "index.html").is_file():
-    #     print(
-    #         f"WARN: Frontend build directory not found or incomplete at {build_path}. Serving frontend will likely fail."
-    #     )
-    #     # Return a dummy router if build isn't ready
-    #     from starlette.routing import Route
-
-    #     async def dummy_frontend(request):
-    #         return Response(
-    #             "Frontend not built. Run 'npm run build' in the frontend directory.",
-    #             media_type="text/plain",
-    #             status_code=503,
-    #         )
-
-    #     return Route("/{path:path}", endpoint=dummy_frontend)
-
     return StaticFiles(directory=build_path, html=True)
 
 
@@ -144,61 +475,27 @@ async def scrape(body: Dict[str, Any] = Body(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Exception contacting cloud function: {str(e)}")
 
-@app.post("/embed")
+@app.post("/task")
 async def embed(body: Dict[str, Any] = Body(...)):
-    required = {"state", "dname", "vname", "vvalue"}
-    if not required.issubset(body):
-        raise HTTPException(status_code=400, detail="Missing required fields")
+    if "task" not in body:
+        raise HTTPException(status_code=400, detail="Missing 'task' in payload")
 
-    store = await get_store()
+    task_name = body["task"]
+    args = body.get("args", {})
+
+    if task_name not in TASKS:
+        raise HTTPException(status_code=400, detail=f"Unknown task: {task_name}")
+    
+    store = None
+    if task_name == "embed_htmls":
+        store = await get_store()
+        args["store"] = store
+        
     # Start embedding in background thread to not block response
     threading.Thread(
-        target=embed_htmls_for_village,
-        args=(body["state"], body["dname"], body["vname"], body["vvalue"], store),
+        target=TASKS[task_name],
+        kwargs=args,
         daemon=True,
     ).start()
 
-    return JSONResponse(status_code=202, content={"success": True, "message": "Embedding started"})
-
-
-
-def get_db_conn():
-    return psycopg2.connect(**DB_CONFIG)
-
-def fetch_survey_rows(district, village, vvalue):
-    conn = get_db_conn()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            sql = """
-                SELECT id, dname, dvalue, tname, tvalue, vname, vvalue, sname, svalue, visibility, lat, lng, geom
-                FROM public.master_survey_rural
-                WHERE dname=%s AND vname=%s AND vvalue=%s
-            """
-            cur.execute(sql, (district, village, vvalue))
-            rows = cur.fetchall()
-            return rows
-    finally:
-        conn.close()
-
-def embed_htmls_for_village(state, dname, vname, vvalue, store):
-    print("Embedding started for:", vname)
-    prefix = f"{bucket_name}/{state}/{vname.split('-')[0]}/"
-    blobs = bucket.list_blobs(prefix=prefix)
-    print("Fetched List of Blobs.", blobs)
-    tenant_id = os.getenv("LANGGRAPH_TENANT_ID")  # store this in env
-    print("Tenant ID:", tenant_id)
-    for blob in blobs:
-        blob_name = blob.name
-        print("Downloading blob for Survey No.:", blob_name)
-        html_data = blob.download_as_text()
-        print("Downloaded blob:", blob_name)
-        # Parse HTML to plain text
-        soup = BeautifulSoup(html_data, "html.parser")
-        text = soup.get_text(separator=" ", strip=True)
-        store.put(
-            namespace=(tenant_id, COLLECTION_NAME),
-            key=blob_name,
-            value=text
-        )
-        print("Embedded blob:", blob_name)
-
+    return JSONResponse(status_code=202, content={"success": True, "message": f"Started {task_name}"})
