@@ -19,7 +19,6 @@ import firebase_admin
 from firebase_admin import auth as fb_auth, credentials, storage as fb_storage
 import httpx
 from google import genai
-from fuzzywuzzy import process
 import json
 
 RESPONSE_SCHEMA = {
