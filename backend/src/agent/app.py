@@ -402,7 +402,7 @@ def add_to_Postgis(state, dname, vname, vvalue):
         else:
             insert_survey_layer(conn, report, area_id)
         print(area_id)
-        return True
+    return True
 
         
         

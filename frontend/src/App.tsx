@@ -31,8 +31,8 @@ export default function App({ token }: { token: string | null }) {
   const client = useMemo(() => {
     return new Client({
       apiUrl: 
-      // "http://localhost:2024",
-        "https://tpm-llm-cd738700aa8d554cbd0da144e4f1a3a8.us.langgraph.app",
+      "http://localhost:2024",
+        // "https://tpm-llm-cd738700aa8d554cbd0da144e4f1a3a8.us.langgraph.app",
       defaultHeaders: { Authorization: `Bearer ${token}` },
     });
   }, [token]);
