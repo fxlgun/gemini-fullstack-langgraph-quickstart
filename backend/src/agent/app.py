@@ -196,31 +196,51 @@ def embed_htmls_for_village(state, dname, vname, vvalue, store):
         )
         print("Embedded blob:", blob_name)
 
-def fuzzy_survey_id(report):
-    survey_no = report["survey_no"]
-    village = report["village"]
-    district = report["district"]
+def fuzzy_survey_exists(district, village):
     conn = get_db_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             sql = """
                 SELECT id
                 FROM public.survey_layer
-                WHERE similarity(district, %s) > 0.3
-	            AND similarity(village, %s) > 0.3
-                AND similarity(survey_no, %s) > 0.3
+                WHERE similarity(district, %s) > 0.5
+	            AND similarity(village, %s) > 0.5
             """
-            cur.execute(sql, (district, village, survey_no))
+            cur.execute(sql, (district, village))
             rows = cur.fetchall()
             if rows:
-                return rows[0]["id"]
+                return rows[0]
             else:
-                return None
+                return False
     except Exception as e:
         print("Error:", e)
         return None
     finally:
         conn.close()
+
+def fuzzy_survey_id(district, village, survey_no):
+    conn = get_db_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            sql = """
+                SELECT id
+                FROM public.survey_layer
+                WHERE district = %s
+	            AND village = %s
+                AND similarity(survey_no, %s) > 0.8
+            """
+            cur.execute(sql, (district, village, survey_no))
+            rows = cur.fetchall()
+            if rows:
+                return rows[0]
+            else:
+                return False
+    except Exception as e:
+        print("Error:", e)
+        return None
+    finally:
+        conn.close()
+    
 
 def fuzzy_area_id(report):
     village = report["village"]
@@ -368,6 +388,7 @@ def add_to_Postgis(state, dname, vname, vvalue):
     print("Fetched List of Blobs.")
     tenant_id = os.getenv("LANGGRAPH_TENANT_ID")  # store this in env
     print("Tenant ID:", tenant_id)
+    survey_exists = fuzzy_survey_exists(dname, vname.split('-')[0])
     for blob in blobs:
         blob_name = blob.name
         print("Downloading blob for Survey No.:", blob_name)
@@ -395,9 +416,9 @@ def add_to_Postgis(state, dname, vname, vvalue):
         area_id = fuzzy_area_id(report)
         report['area_id'] = area_id
         report['state'] = state
-        survey_id = fuzzy_survey_id(report)
         conn = get_db_conn()
-        if survey_id:
+        if survey_exists:
+            survey_id = fuzzy_survey_id(survey_exists['district'], survey_exists['village'], report['survey_no'])
             update_survey_layer(conn, survey_id, report, area_id)
         else:
             insert_survey_layer(conn, report, area_id)
