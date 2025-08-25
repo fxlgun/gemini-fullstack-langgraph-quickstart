@@ -437,6 +437,7 @@ def extract_report_with_retries(text, retries=3, delay=10):
 
             # Require at least survey_no + village
             if report.get("survey_no") and report.get("village"):
+                print(f"[Retry {attempt}] Extracted report: {report}")
                 return report
             else:
                 print(f"[Retry {attempt}] Missing critical fields, retrying...")
