@@ -20,6 +20,9 @@ from firebase_admin import auth as fb_auth, credentials, storage as fb_storage
 import httpx
 from google import genai
 import json
+import time
+
+FAILED_LOG = "failed_ingestion.log"
 
 RESPONSE_SCHEMA = {
     "type": "OBJECT",
@@ -203,8 +206,8 @@ def fuzzy_survey_exists(district, village):
             sql = """
                 SELECT id
                 FROM public.survey_layer
-                WHERE similarity(district, %s) > 0.5
-	            AND similarity(village, %s) > 0.5
+                WHERE similarity(district, %s) > 0.3
+	            AND similarity(village, %s) > 0.3
             """
             cur.execute(sql, (district, village))
             rows = cur.fetchall()
@@ -227,7 +230,7 @@ def fuzzy_survey_id(district, village, survey_no):
                 FROM public.survey_layer
                 WHERE district = %s
 	            AND village = %s
-                AND similarity(survey_no, %s) > 0.8
+                AND similarity(survey_no, %s) > 0.5
             """
             cur.execute(sql, (district, village, survey_no))
             rows = cur.fetchall()
@@ -287,10 +290,10 @@ def insert_survey_layer(conn, report, area_id):
     with conn.cursor() as cur:
         cur.execute(sql, (
             report.get("upin"),
-            report.get("state"),
-            report.get("district"),
-            report.get("taluka"),
-            report.get("village"),
+            report.get("state").upper(),
+            report.get("district").upper(),
+            report.get("taluka").upper(),
+            report.get("village").upper(),
             report.get("survey_no"),
             report.get("old_survey_number"),
             report.get("old_survey_notes"),
@@ -381,53 +384,166 @@ def update_survey_layer(conn, survey_id, report, area_id):
 
 
 
-def add_to_Postgis(state, dname, vname, vvalue):
+def enforce_schema(report: dict) -> dict:
+    """Ensure report has all keys from RESPONSE_SCHEMA, fill with None/[] as needed."""
+    def fill(schema, data):
+        if schema["type"] == "OBJECT":
+            res = {}
+            props = schema.get("properties", {})
+            for k, v in props.items():
+                res[k] = fill(v, data.get(k) if isinstance(data, dict) else None)
+            return res
+        elif schema["type"] == "ARRAY":
+            return data if isinstance(data, list) else []
+        else:
+            return data if data not in (None, "") else None
+    return fill(RESPONSE_SCHEMA, report or {})
+
+def log_failure(blob_name, reason):
+    """Append failed blob info to a logfile for later reprocessing"""
+    with open(FAILED_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "blob": blob_name,
+            "reason": reason,
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S")
+        }, ensure_ascii=False) + "\n")
+
+
+def extract_report_with_retries(text, retries=3, delay=10):
+    """
+    Call Gemini with schema enforcement + retries.
+    Always returns a schema-complete dict (even if empty).
+    """
+    client = genai.Client()
+    prompt = (
+        "Extract all relevant fields from this Gujarat integrated land record HTML, "
+        "transliterating them into English. "
+        "IMPORTANT: Always output all fields from the schema, even if null.\n\n"
+        f"{text}"
+    )
+
+    for attempt in range(1, retries + 1):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[prompt],
+                config={
+                    "response_mime_type": "application/json",
+                    "response_schema": RESPONSE_SCHEMA
+                },
+            )
+            report = response.parsed or {}
+            report = enforce_schema(report)
+
+            # Require at least survey_no + village
+            if report.get("survey_no") and report.get("village"):
+                return report
+            else:
+                print(f"[Retry {attempt}] Missing critical fields, retrying...")
+        except Exception as e:
+            print(f"[Retry {attempt}] Gemini error: {e}")
+
+        time.sleep(delay)
+
+    print("❌ Failed to extract after retries.")
+    return enforce_schema({})  # return schema with nulls
+
+def survey_uid_exists(conn, uid):
+    sql = "SELECT id FROM public.survey_layer WHERE uid = %s"
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql, (uid,))
+        row = cur.fetchone()
+        return row["id"] if row else None
+
+
+def extract_report_with_retries(text, retries=3, delay=2):
+    """Try Gemini extraction with retry in case of missing fields or errors"""
+    client = genai.Client()
+    prompt = (
+        "Extract all relevant fields from this Gujarat integrated land record HTML "
+        "transliterating them in English and fill them into the defined JSON schema. "
+        "IMPORTANT: Always output *all fields* from the schema, even if null.\n\n"
+        f"{text}"
+    )
+
+    for attempt in range(1, retries + 1):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[prompt],
+                config={
+                    "response_mime_type": "application/json",
+                    "response_schema": RESPONSE_SCHEMA
+                },
+            )
+            report = response.parsed or {}
+            # Require at least core fields
+            if report.get("survey_no") and report.get("village"):
+                return report
+            else:
+                print(f"[Retry {attempt}] Missing critical fields, retrying...")
+        except Exception as e:
+            print(f"[Retry {attempt}] Extraction error: {e}")
+        time.sleep(delay)
+
+    print("❌ Failed to extract after retries.")
+    return None
+
+
+def add_to_Postgis(state, dname, vname, vvalue, force_update=False, resume_from=None):
     print("Adding to Postgis started for:", vname)
     prefix = f"{bucket_name}/{state}/{vname.split('-')[0]}/"
-    blobs = bucket.list_blobs(prefix=prefix)
-    print("Fetched List of Blobs.")
-    tenant_id = os.getenv("LANGGRAPH_TENANT_ID")  # store this in env
-    print("Tenant ID:", tenant_id)
-    survey_exists = fuzzy_survey_exists(dname, vname.split('-')[0])
-    for blob in blobs:
-        blob_name = blob.name
-        print("Downloading blob for Survey No.:", blob_name)
-        html_data = blob.download_as_text()
-        # Parse HTML to plain text
-        soup = BeautifulSoup(html_data, "html.parser")
-        text = soup.get_text(separator=" ", strip=True)
-        prompt = (
-            "Extract all relevant fields from this Gujarat integrated land record HTML transliterating them in English"
-            "and fill them into the defined JSON schema (fields may be null if absent):\n\n"
-            f"{text}" 
-        )
+    blobs = list(bucket.list_blobs(prefix=prefix))
+    print(f"Fetched {len(blobs)} blobs.")
+    skip_mode = True if resume_from else False
 
-        client = genai.Client()
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[prompt],
-            config={
-                "response_mime_type": "application/json",
-                "response_schema": RESPONSE_SCHEMA
-            },
-        )
-        report = response.parsed  # well-formed dict
-        print("Structured JSON:", report)
-        area_id = fuzzy_area_id(report)
-        report['area_id'] = area_id
-        report['state'] = state
-        conn = get_db_conn()
-        if survey_exists:
-            survey_id = fuzzy_survey_id(survey_exists['district'], survey_exists['village'], report['survey_no'])
-            update_survey_layer(conn, survey_id, report, area_id)
-        else:
-            insert_survey_layer(conn, report, area_id)
-        print(area_id)
+
+    conn = get_db_conn()   # open one conn for the batch
+    try:
+        for blob in blobs:
+            blob_name = blob.name
+            if skip_mode:
+                if blob_name == resume_from:
+                    print(f"✅ Resuming from {blob_name}")
+                    skip_mode = False
+                else:
+                    print(f"⏭️ Skipping {blob_name} until resume_from={resume_from}")
+                    continue
+            print("Downloading blob for Survey No.:", blob_name)
+            html_data = blob.download_as_text()
+            soup = BeautifulSoup(html_data, "html.parser")
+            text = soup.get_text(separator=" ", strip=True)
+
+            # === Extract structured JSON with retry ===
+            report = extract_report_with_retries(text)
+            if not report or not report.get("survey_no"):
+                log_failure(blob_name, "Extraction failed or missing survey_no")
+                continue
+
+            # === Post-processing ===
+            report['state'] = state
+            report['area_id'] = fuzzy_area_id(report)
+            uid = report.get("village", "").upper() + "_" + str(report.get("survey_no"))
+            report["uid"] = uid
+
+            try:
+                existing_id = survey_uid_exists(conn, uid)
+                if existing_id:
+                    if force_update:
+                        print(f"Updating existing UID={uid} (id={existing_id})")
+                        update_survey_layer(conn, existing_id, report, report['area_id'])
+                    else:
+                        print(f"Skipping UID={uid}, already exists (id={existing_id})")
+                        continue
+                else:
+                    insert_survey_layer(conn, report, report['area_id'])
+            except Exception as e:
+                log_failure(blob_name, f"DB error: {e}")
+                print(f"❌ DB error for UID={uid}: {e}")
+    finally:
+        conn.close()
+
     return True
-
-        
-        
-        
 
 
 TASKS = {
